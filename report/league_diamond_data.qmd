@@ -3,11 +3,14 @@ title: "League of Legends: Does the Early Game Decide the Winner?"
 subtitle: "Course DS 250"
 format:
   html:
-    theme: cosmo
+    theme:
+      - darkly
+      - dark-pulse.scss
     css: styles.css
     self-contained: true
     page-layout: full
-    title-block-banner: true
+    title-block-banner: "#593196"
+    title-block-banner-color: "#ffffff"
     toc: true
     toc-depth: 3
     toc-location: left
@@ -42,6 +45,17 @@ import numpy as np
 # ---- Plotting ----
 from lets_plot import *
 LetsPlot.setup_html(isolated_frame=True)
+
+# Dark chart style to match the report's dark theme
+chart_theme = theme_minimal() + theme(
+    plot_background=element_rect(fill="#222222", color="#222222"),
+    panel_background=element_rect(fill="#222222", color="#222222"),
+    legend_background=element_rect(fill="#222222", color="#222222"),
+    text=element_text(color="#e8e6e3"),
+    axis_text=element_text(color="#c3c2b7"),
+    panel_grid_major=element_line(color="#3a3a38"),
+    panel_grid_minor=element_blank(),
+)
 
 # ---- Cleaner tables in the report ----
 pl.Config.set_tbl_hide_column_data_types(True)  # hide the dtype row under headers
@@ -163,11 +177,11 @@ gold_bins = (
 
 (
     ggplot(gold_bins, aes(x="gold_lead", y="blue_win_pct"))
-    + geom_bar(stat="identity", fill="#2a78d6", width=0.8,
+    + geom_bar(stat="identity", fill="#9085e9", width=0.8,
                tooltips=layer_tooltips().line("Gold lead|@gold_lead to +1k")
                                         .line("Blue win rate|@blue_win_pct%")
                                         .line("Games|@games"))
-    + geom_hline(yintercept=50, linetype="dashed", color="#888888", size=0.5)
+    + geom_hline(yintercept=50, linetype="dashed", color="#8a8984", size=0.5)
     + scale_x_discrete(limits=gold_bins["gold_lead"].to_list())
     + labs(
         title="Blue win rate by gold lead at 10 minutes",
@@ -175,7 +189,7 @@ gold_bins = (
         x="Blue team gold lead at 10 min (thousands)",
         y="Blue win rate (%)",
     )
-    + theme_minimal()
+    + chart_theme
 )
 ```
 
@@ -199,17 +213,17 @@ first_blood = (
 
 (
     ggplot(first_blood, aes(x="first_blood", y="blue_win_pct"))
-    + geom_bar(stat="identity", fill="#2a78d6", width=0.5,
+    + geom_bar(stat="identity", fill="#9085e9", width=0.5,
                tooltips=layer_tooltips().line("@first_blood")
                                         .line("Blue win rate|@blue_win_pct%")
                                         .line("Games|@games"))
-    + geom_hline(yintercept=50, linetype="dashed", color="#888888", size=0.5)
+    + geom_hline(yintercept=50, linetype="dashed", color="#8a8984", size=0.5)
     + labs(
         title="Blue win rate by who got first blood",
         x="",
         y="Blue win rate (%)",
     )
-    + theme_minimal()
+    + chart_theme
 )
 ```
 
@@ -356,11 +370,11 @@ gold_corr = (
 
 (
     ggplot(gold_corr, aes(x="correlation", y="input"))
-    + geom_bar(stat="identity", orientation="y", fill="#2a78d6", width=0.7,
+    + geom_bar(stat="identity", orientation="y", fill="#9085e9", width=0.7,
                tooltips=layer_tooltips().line("@input")
                                         .line("Correlation with goldDiff|@correlation"))
-    + geom_text(aes(label="label"), hjust="left", nudge_x=0.015, size=6, color="#222222")
-    + geom_vline(xintercept=0, color="#888888", size=0.5)
+    + geom_text(aes(label="label"), hjust="left", nudge_x=0.015, size=6, color="#e8e6e3")
+    + geom_vline(xintercept=0, color="#8a8984", size=0.5)
     + scale_y_discrete(limits=gold_corr["input"].to_list())
     + scale_x_continuous(limits=[-0.1, 1.05])
     + labs(
@@ -368,7 +382,7 @@ gold_corr = (
         subtitle="1 = moves exactly with gold, 0 = unrelated (training games)",
         x="Correlation with goldDiff", y="",
     )
-    + theme_minimal()
+    + chart_theme
 )
 ```
 
@@ -464,8 +478,8 @@ set_order = list(feature_sets.keys())
                                         .line("Inputs|@inputs")
                                         .line("Test accuracy|@test_accuracy%")
                                         .line("CV accuracy|@cv_accuracy% (± @cv_spread)"))
-    + geom_hline(yintercept=baseline_acc * 100, linetype="dashed", color="#888888", size=0.5)
-    + scale_fill_manual(values=["#2a78d6", "#eb6834", "#1baf7a"], limits=model_order, name="")
+    + geom_hline(yintercept=baseline_acc * 100, linetype="dashed", color="#8a8984", size=0.5)
+    + scale_fill_manual(values=["#3987e5", "#d95926", "#199e70"], limits=model_order, name="")
     + scale_x_discrete(limits=set_order)
     + coord_cartesian(ylim=[40, 80])
     + labs(
@@ -473,7 +487,7 @@ set_order = list(feature_sets.keys())
         subtitle="Dashed line = baseline (always guessing the same outcome)",
         x="", y="Test accuracy (%)",
     )
-    + theme_minimal()
+    + chart_theme
     + theme(legend_position="top")
 )
 ```
@@ -527,11 +541,11 @@ repeated_summary
 ```{python}
 (
     ggplot(repeated_scores, aes(x="model", y="accuracy"))
-    + geom_boxplot(fill="#cde2fb", color="#2a78d6", width=0.6, outlier_size=2,
+    + geom_boxplot(fill="#9085e9", alpha=0.35, color="#b3abf0", width=0.6, outlier_size=2,
                    tooltips=layer_tooltips().line("@model"))
     # Dark dot = each model's average across the 50 runs
     + geom_point(aes(x="model", y="mean_accuracy"), data=repeated_summary,
-                 color="#184f95", size=4,
+                 color="#f0efec", size=4,
                  tooltips=layer_tooltips().line("@model")
                                           .line("Average|@mean_accuracy%"))
     + scale_x_discrete(limits=repeated_summary["model"].to_list())
@@ -542,7 +556,7 @@ repeated_summary
         subtitle=f"Dot = average, line in box = median. Sorted best to worst. Baseline (always guessing): {baseline_acc * 100:.1f}%",
         x="", y="Accuracy (%)",
     )
-    + theme_minimal()
+    + chart_theme
     + theme(axis_text_x=element_text(angle=30, hjust=1))
     + ggsize(900, 500)
 )
@@ -572,15 +586,15 @@ weights = (
 
 (
     ggplot(weights, aes(x="weight", y="input"))
-    + geom_bar(stat="identity", orientation="y", fill="#2a78d6", width=0.7,
+    + geom_bar(stat="identity", orientation="y", fill="#9085e9", width=0.7,
                tooltips=layer_tooltips().line("@input").line("Weight|@weight"))
-    + geom_vline(xintercept=0, color="#888888", size=0.5)
+    + geom_vline(xintercept=0, color="#8a8984", size=0.5)
     + scale_y_discrete(limits=weights["input"].to_list())
     + labs(
         title="Logistic Regression weights (all inputs, scaled)",
         x="Weight (positive = favors blue win)", y="",
     )
-    + theme_minimal()
+    + chart_theme
 )
 ```
 

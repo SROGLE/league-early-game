@@ -48,6 +48,7 @@ stats at 10 minutes and whether blue won.
 docs/index.html                 The rendered report (served by GitHub Pages)
 report/league_diamond_data.qmd  Quarto source with all the code
 report/styles.css               Table and heading styles for the report
+report/dark-pulse.scss          Dark theme with purple accents and Lux-style fonts
 ```
 
 ## Re-running the report
