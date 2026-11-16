@@ -1,0 +1,58 @@
+/* ---- Tables produced by Polars (class="dataframe") ---- */
+
+/* Wide tables scroll sideways instead of being cut off */
+.cell-output-display div:has(> table.dataframe) {
+  overflow-x: auto;
+  max-width: 100%;
+  margin: 0.75rem 0 1.25rem;
+}
+
+table.dataframe {
+  border-collapse: collapse;
+  border: none;
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
+  width: auto;
+}
+
+table.dataframe thead th {
+  background: #2a78d6;
+  color: #ffffff;
+  font-weight: 600;
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  border: none;
+  white-space: nowrap;
+}
+
+table.dataframe tbody td {
+  padding: 0.4rem 0.75rem;
+  border: none;
+  border-bottom: 1px solid #e5e7eb;
+  white-space: nowrap;
+}
+
+/* Quarto already adds Bootstrap's striped-table class; just set its colors */
+table.dataframe {
+  --bs-table-striped-bg: #f6f8fb;
+  --bs-table-hover-bg: #e6f0fc;
+}
+
+/* ---- Printed output (print statements, classification report) ---- */
+.cell-output-stdout pre {
+  background: #f6f8fb;
+  border-left: 3px solid #2a78d6;
+  padding: 0.6rem 0.9rem;
+  font-size: 0.85rem;
+}
+
+/* ---- Headings ---- */
+h2 {
+  margin-top: 2.5rem;
+  padding-bottom: 0.3rem;
+  border-bottom: 2px solid #e5e7eb;
+}
+
+h3 {
+  margin-top: 1.75rem;
+}

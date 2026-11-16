@@ -1,0 +1,680 @@
+---
+title: "League of Legends: Does the Early Game Decide the Winner?"
+subtitle: "Course DS 250"
+format:
+  html:
+    theme: cosmo
+    css: styles.css
+    self-contained: true
+    page-layout: full
+    title-block-banner: true
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    toc-title: "Contents"
+    code-fold: true
+    code-summary: "Show the code"
+    code-overflow: wrap
+    code-copy: hover
+execute:
+  warning: false
+---
+
+## Elevator pitch
+
+**At the 10-minute mark, the gold lead is the best sign of who will win a
+high-Diamond ranked game, and first blood adds almost nothing once you know it.**
+Using only 10-minute stats, our best model (Logistic Regression) picks the winner
+correctly about **73%** of the time, compared with 50% for guessing. Seven very
+different models all topped out between 72% and 74%, which tells us the limit
+comes from the data itself: roughly a quarter of games are still decided after
+10 minutes.
+
+## Setup
+
+```{python}
+# ---- Data handling ----
+import os
+import kagglehub
+import polars as pl
+import numpy as np
+
+# ---- Plotting ----
+from lets_plot import *
+LetsPlot.setup_html(isolated_frame=True)
+
+# ---- Cleaner tables in the report ----
+pl.Config.set_tbl_hide_column_data_types(True)  # hide the dtype row under headers
+pl.Config.set_tbl_hide_dataframe_shape(True)    # hide the "shape: (rows, cols)" line
+pl.Config.set_float_precision(2)                # show decimals to 2 places
+
+# ---- scikit-learn: splitting, tuning, and preprocessing ----
+from sklearn.model_selection import (
+    train_test_split,
+    cross_val_score,
+    StratifiedKFold,
+    RepeatedStratifiedKFold,
+)
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import make_pipeline
+
+# ---- scikit-learn: classification models (predict a category: win / loss) ----
+from sklearn.dummy import DummyClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.tree import DecisionTreeClassifier, export_text
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.naive_bayes import GaussianNB
+from sklearn.svm import SVC
+
+# ---- scikit-learn: metrics ----
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    confusion_matrix,
+    roc_auc_score,
+)
+```
+
+```{python}
+# Download latest version of the dataset
+path = kagglehub.dataset_download("bobbyscience/league-of-legends-diamond-ranked-games-10-min")
+
+# One row = one ranked game, with both teams' stats at the 10-minute mark
+games = pl.read_csv(os.path.join(path, "high_diamond_ranked_10min.csv"))
+
+print("Games:", games.shape)
+```
+
+## About the data
+
+- **Source:** [League of Legends Diamond Ranked Games (10 min)](https://www.kaggle.com/datasets/bobbyscience/league-of-legends-diamond-ranked-games-10-min) on Kaggle.
+- **What it covers:** 9,879 high-Diamond solo queue games. Each row is one game, with both teams' stats at the 10-minute mark and whether blue won.
+- **When:** the dataset was posted about six years ago (around 2020), so the games come from an older version of the game. It has Rift Herald before 10 minutes and no Void Grubs (added in 2024). The exact patch isn't listed.
+- **Limits:** these are ranked games between strong solo players, not organized pro teams. Results describe that setting and that era of the game, not League as it's played today or at MSI.
+
+## Looking at the data
+
+### Every column at a glance
+
+```{python}
+games.glimpse()
+```
+
+### Missing values and duplicate games
+
+```{python}
+print("Total missing values:", games.null_count().sum_horizontal().item())
+print("Rows:", games.height, "| Unique gameIds:", games["gameId"].n_unique())
+```
+
+### The target: did blue win?
+
+`blueWins` is 1 if the blue team won and 0 if red won. A roughly 50/50 split means
+guessing "blue wins" every time would only be right about half the time. That is
+the baseline any model has to beat.
+
+```{python}
+games.group_by("blueWins").agg(pl.len().alias("games")).with_columns(
+    (pl.col("games") / pl.col("games").sum() * 100).round(1).alias("percent")
+).sort("blueWins")
+```
+
+### Summary statistics for the blue team
+
+```{python}
+blue_cols = [c for c in games.columns if c.startswith("blue")]
+games.select(blue_cols).describe()
+```
+
+### Mirror-image columns
+
+Many red columns are just the blue column flipped. If they are exact mirrors,
+they add no new information and we can drop them before modeling.
+
+```{python}
+checks = {
+    "blueGoldDiff == -redGoldDiff": (games["blueGoldDiff"] == -games["redGoldDiff"]).all(),
+    "blueExperienceDiff == -redExperienceDiff": (games["blueExperienceDiff"] == -games["redExperienceDiff"]).all(),
+    "blueKills == redDeaths": (games["blueKills"] == games["redDeaths"]).all(),
+    "blueDeaths == redKills": (games["blueDeaths"] == games["redKills"]).all(),
+    "blueFirstBlood + redFirstBlood == 1": ((games["blueFirstBlood"] + games["redFirstBlood"]) == 1).all(),
+}
+pl.DataFrame({"check": list(checks.keys()), "always true?": list(checks.values())})
+```
+
+### How often does blue win, by gold lead at 10 minutes?
+
+```{python}
+gold_bins = (
+    games.with_columns(
+        (pl.col("blueGoldDiff") / 1000).floor().clip(-6, 5).cast(pl.Int64).alias("gold_bin")
+    )
+    .group_by("gold_bin")
+    .agg(
+        (pl.col("blueWins").mean() * 100).round(1).alias("blue_win_pct"),
+        pl.len().alias("games"),
+    )
+    .with_columns(
+        (pl.col("gold_bin").cast(pl.Utf8) + "k").alias("gold_lead")
+    )
+    .sort("gold_bin")
+)
+
+(
+    ggplot(gold_bins, aes(x="gold_lead", y="blue_win_pct"))
+    + geom_bar(stat="identity", fill="#2a78d6", width=0.8,
+               tooltips=layer_tooltips().line("Gold lead|@gold_lead to +1k")
+                                        .line("Blue win rate|@blue_win_pct%")
+                                        .line("Games|@games"))
+    + geom_hline(yintercept=50, linetype="dashed", color="#888888", size=0.5)
+    + scale_x_discrete(limits=gold_bins["gold_lead"].to_list())
+    + labs(
+        title="Blue win rate by gold lead at 10 minutes",
+        subtitle="Each bar covers a 1,000-gold range; outer bars include everything beyond ±5k",
+        x="Blue team gold lead at 10 min (thousands)",
+        y="Blue win rate (%)",
+    )
+    + theme_minimal()
+)
+```
+
+### How often does blue win, by first blood?
+
+```{python}
+first_blood = (
+    games.group_by("blueFirstBlood")
+    .agg(
+        (pl.col("blueWins").mean() * 100).round(1).alias("blue_win_pct"),
+        pl.len().alias("games"),
+    )
+    .with_columns(
+        pl.when(pl.col("blueFirstBlood") == 1)
+        .then(pl.lit("Blue got first blood"))
+        .otherwise(pl.lit("Red got first blood"))
+        .alias("first_blood")
+    )
+    .sort("blueFirstBlood", descending=True)
+)
+
+(
+    ggplot(first_blood, aes(x="first_blood", y="blue_win_pct"))
+    + geom_bar(stat="identity", fill="#2a78d6", width=0.5,
+               tooltips=layer_tooltips().line("@first_blood")
+                                        .line("Blue win rate|@blue_win_pct%")
+                                        .line("Games|@games"))
+    + geom_hline(yintercept=50, linetype="dashed", color="#888888", size=0.5)
+    + labs(
+        title="Blue win rate by who got first blood",
+        x="",
+        y="Blue win rate (%)",
+    )
+    + theme_minimal()
+)
+```
+
+## Cleaning the data
+
+No games need to be removed: there are no missing values and no duplicate games.
+The cleanup is about columns:
+
+1. **Split into training and test games first.** 80% of games are used to
+   train the models and 20% are locked away as the test set. Splitting *before*
+   any cleaning that learns from the data keeps the test games truly unseen.
+2. **Cap wards placed.** A few games show over 100 wards placed in 10 minutes
+   (max 276), which isn't realistic. Any value above the 99th percentile *of the
+   training games* is lowered to that value, so the game stays in the data but
+   stops distorting the column.
+3. **Turn blue and red pairs into differences** (blue minus red). Positive means
+   blue is ahead, negative means red is ahead.
+4. **Drop everything else**: `gameId`, the mirror-image red columns, and columns
+   that are just another column rescaled (per-minute stats, elite monsters,
+   average level).
+
+### Step 1: split into training and test games
+
+`stratify` keeps the same ~50/50 win split in both sets, and `random_state`
+makes the split identical every time the report runs.
+
+```{python}
+row_ids = np.arange(games.height)
+train_ids, test_ids = train_test_split(
+    row_ids,
+    test_size=0.2,
+    stratify=games["blueWins"].to_numpy(),
+    random_state=42,
+)
+
+games = games.with_columns(
+    pl.when(pl.Series(np.isin(row_ids, train_ids)))
+    .then(pl.lit("train"))
+    .otherwise(pl.lit("test"))
+    .alias("split")
+)
+
+games.group_by("split").agg(
+    pl.len().alias("games"),
+    (pl.col("blueWins").mean() * 100).round(1).alias("blue_win_pct"),
+)
+```
+
+### Step 2: cap wards placed (learned from training games only)
+
+```{python}
+train_games = games.filter(pl.col("split") == "train")
+
+# One shared cap for both teams, so blue and red are treated the same
+ward_cap = (
+    pl.concat([train_games["blueWardsPlaced"], train_games["redWardsPlaced"]])
+    .quantile(0.99)
+)
+print("Wards placed cap (99th percentile of training games):", ward_cap)
+print("Blue values capped:", games.filter(pl.col("blueWardsPlaced") > ward_cap).height)
+print("Red values capped:", games.filter(pl.col("redWardsPlaced") > ward_cap).height)
+
+games_capped = games.with_columns(
+    pl.col("blueWardsPlaced").clip(upper_bound=ward_cap),
+    pl.col("redWardsPlaced").clip(upper_bound=ward_cap),
+)
+```
+
+### Step 3: build the difference columns
+
+```{python}
+model_data = games_capped.select(
+    pl.col("split"),
+    pl.col("blueWins"),
+    pl.col("blueFirstBlood"),
+    pl.col("blueGoldDiff").alias("goldDiff"),
+    pl.col("blueExperienceDiff").alias("xpDiff"),
+    (pl.col("blueKills") - pl.col("redKills")).alias("killsDiff"),
+    (pl.col("blueAssists") - pl.col("redAssists")).alias("assistsDiff"),
+    (pl.col("blueDragons") - pl.col("redDragons")).alias("dragonsDiff"),
+    (pl.col("blueHeralds") - pl.col("redHeralds")).alias("heraldsDiff"),
+    (pl.col("blueTowersDestroyed") - pl.col("redTowersDestroyed")).alias("towersDiff"),
+    (pl.col("blueTotalMinionsKilled") - pl.col("redTotalMinionsKilled")).alias("csDiff"),
+    (pl.col("blueTotalJungleMinionsKilled") - pl.col("redTotalJungleMinionsKilled")).alias("jungleCsDiff"),
+    (pl.col("blueWardsPlaced") - pl.col("redWardsPlaced")).alias("wardsPlacedDiff"),
+    (pl.col("blueWardsDestroyed") - pl.col("redWardsDestroyed")).alias("wardsDestroyedDiff"),
+)
+
+print("Before cleaning:", games.shape)
+print("After cleaning: ", model_data.shape)
+model_data.glimpse()
+```
+
+### Summary of the cleaned data
+
+```{python}
+# "split" is text (train/test), so it's left out of the summary statistics
+model_data.drop("split").describe()
+```
+
+### Save the cleaned data
+
+The `split` column is saved too, so anyone using the CSV gets the same
+training and test games.
+
+```{python}
+model_data.write_csv("league_diamond_model.csv")
+print("Saved league_diamond_model.csv")
+```
+
+## Modeling
+
+### How much of each input is already inside the gold lead?
+
+Kills, assists, and CS all earn gold, so those inputs likely rise and fall with
+`goldDiff`. This chart shows each input's correlation with `goldDiff`: close to
+1 means "mostly the same information as gold," close to 0 means "something
+gold doesn't capture." It matters for two reasons: it explains why adding more
+inputs barely improves accuracy, and why Logistic Regression's weights can look
+strange (inputs that move with gold share credit with it). Correlations are
+calculated on the training games only.
+
+```{python}
+feature_cols = [c for c in model_data.columns if c not in ("split", "blueWins")]
+train = model_data.filter(pl.col("split") == "train")
+test = model_data.filter(pl.col("split") == "test")
+
+other_inputs = [c for c in feature_cols if c != "goldDiff"]
+gold_corr = (
+    pl.DataFrame({
+        "input": other_inputs,
+        "correlation": [train.select(pl.corr("goldDiff", c)).item() for c in other_inputs],
+    })
+    .with_columns(pl.col("correlation").round(2))
+    # Label only the strong ones (0.5 or more); hover any bar for its value
+    .with_columns(
+        pl.when(pl.col("correlation").abs() >= 0.5)
+        .then(pl.col("correlation").cast(pl.Utf8))
+        .otherwise(pl.lit(""))
+        .alias("label")
+    )
+    .sort("correlation")
+)
+
+(
+    ggplot(gold_corr, aes(x="correlation", y="input"))
+    + geom_bar(stat="identity", orientation="y", fill="#2a78d6", width=0.7,
+               tooltips=layer_tooltips().line("@input")
+                                        .line("Correlation with goldDiff|@correlation"))
+    + geom_text(aes(label="label"), hjust="left", nudge_x=0.015, size=6, color="#222222")
+    + geom_vline(xintercept=0, color="#888888", size=0.5)
+    + scale_y_discrete(limits=gold_corr["input"].to_list())
+    + scale_x_continuous(limits=[-0.1, 1.05])
+    + labs(
+        title="How closely each input follows the gold lead",
+        subtitle="1 = moves exactly with gold, 0 = unrelated (training games)",
+        x="Correlation with goldDiff", y="",
+    )
+    + theme_minimal()
+)
+```
+
+### The models and the input sets
+
+Three models:
+
+- **Logistic Regression** (main pick): weights each input and turns the total
+  into a win probability. Inputs are scaled first because gold runs into the
+  thousands while dragons are only −1 to +1. The scaler sits inside a pipeline,
+  so it only learns from training data.
+- **Gradient Boosting** (contender): hundreds of small trees, each fixing the
+  last one's mistakes.
+- **Decision Tree, 3 levels** (fun one): a short set of yes/no rules you can read.
+
+Four input sets, to answer "first blood or gold?":
+
+```{python}
+models = {
+    "Logistic Regression": make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000)),
+    "Gradient Boosting": GradientBoostingClassifier(random_state=42),
+    "Decision Tree (3 levels)": DecisionTreeClassifier(max_depth=3, random_state=42),
+}
+
+feature_sets = {
+    "First blood only": ["blueFirstBlood"],
+    "Gold difference only": ["goldDiff"],
+    "First blood + gold": ["blueFirstBlood", "goldDiff"],
+    "All 12 inputs": feature_cols,
+}
+
+y_train = train["blueWins"].to_numpy()
+y_test = test["blueWins"].to_numpy()
+
+# Baseline: always guess the most common outcome in the training games
+baseline = DummyClassifier(strategy="most_frequent").fit(
+    train.select("blueFirstBlood").to_numpy(), y_train
+)
+baseline_acc = accuracy_score(y_test, baseline.predict(test.select("blueFirstBlood").to_numpy()))
+print(f"Baseline accuracy (always guess the same outcome): {baseline_acc:.1%}")
+```
+
+### Training and testing every combination
+
+For each model and input set:
+
+1. **5-fold cross-validation on the training games.** Train on 4/5, score on the
+   last 1/5, five times. The average shows typical performance and the spread
+   shows how stable it is.
+2. **Train on all training games, then score once on the locked test games.**
+
+```{python}
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+rows = []
+
+for set_name, cols in feature_sets.items():
+    X_train = train.select(cols).to_numpy()
+    X_test = test.select(cols).to_numpy()
+
+    for model_name, model in models.items():
+        cv_scores = cross_val_score(model, X_train, y_train, cv=cv, scoring="accuracy")
+        model.fit(X_train, y_train)
+        test_pred = model.predict(X_test)
+        test_prob = model.predict_proba(X_test)[:, 1]
+
+        rows.append({
+            "inputs": set_name,
+            "model": model_name,
+            "cv_accuracy": round(cv_scores.mean() * 100, 1),
+            "cv_spread": round(cv_scores.std() * 100, 1),
+            "test_accuracy": round(accuracy_score(y_test, test_pred) * 100, 1),
+            "test_auc": round(roc_auc_score(y_test, test_prob), 3),
+        })
+
+results = pl.DataFrame(rows)
+results
+```
+
+### Test accuracy grid
+
+```{python}
+results.pivot(on="model", index="inputs", values="test_accuracy")
+```
+
+```{python}
+model_order = list(models.keys())
+set_order = list(feature_sets.keys())
+
+(
+    ggplot(results, aes(x="inputs", y="test_accuracy", fill="model"))
+    + geom_bar(stat="identity", position=position_dodge(width=0.85), width=0.8,
+               tooltips=layer_tooltips().line("@model")
+                                        .line("Inputs|@inputs")
+                                        .line("Test accuracy|@test_accuracy%")
+                                        .line("CV accuracy|@cv_accuracy% (± @cv_spread)"))
+    + geom_hline(yintercept=baseline_acc * 100, linetype="dashed", color="#888888", size=0.5)
+    + scale_fill_manual(values=["#2a78d6", "#eb6834", "#1baf7a"], limits=model_order, name="")
+    + scale_x_discrete(limits=set_order)
+    + coord_cartesian(ylim=[40, 80])
+    + labs(
+        title="Test accuracy by model and inputs",
+        subtitle="Dashed line = baseline (always guessing the same outcome)",
+        x="", y="Test accuracy (%)",
+    )
+    + theme_minimal()
+    + theme(legend_position="top")
+)
+```
+
+### Is there a better model? Testing every model with repeated cross-validation
+
+Our three models all landed around 72%. To check whether a different model
+type does better, every classifier is run through **repeated cross-validation**
+on the training games using all 12 inputs: 5-fold cross-validation, repeated
+10 times with different shuffles, for **50 scores per model**. With 50 scores,
+it's clear whether a small gap between two models is real or just luck.
+
+Models that depend on distances or scale (Logistic Regression, KNN, SVM) get
+`StandardScaler` inside their pipeline. Tree models don't need it.
+
+```{python}
+all_models = {
+    "Logistic Regression": make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000)),
+    "Gradient Boosting": GradientBoostingClassifier(random_state=42),
+    "Random Forest": RandomForestClassifier(n_estimators=300, min_samples_leaf=20, random_state=42),
+    "Decision Tree (3 levels)": DecisionTreeClassifier(max_depth=3, random_state=42),
+    "K-Nearest Neighbors": make_pipeline(StandardScaler(), KNeighborsClassifier(n_neighbors=50)),
+    "Naive Bayes": GaussianNB(),
+    "SVM": make_pipeline(StandardScaler(), SVC()),
+}
+
+repeated_cv = RepeatedStratifiedKFold(n_splits=5, n_repeats=10, random_state=42)
+X_train_all = train.select(feature_cols).to_numpy()
+
+score_rows = []
+for model_name, model in all_models.items():
+    scores = cross_val_score(model, X_train_all, y_train, cv=repeated_cv,
+                             scoring="accuracy")
+    for s in scores:
+        score_rows.append({"model": model_name, "accuracy": round(s * 100, 2)})
+
+repeated_scores = pl.DataFrame(score_rows)
+repeated_summary = (
+    repeated_scores.group_by("model")
+    .agg(
+        pl.col("accuracy").mean().round(2).alias("mean_accuracy"),
+        pl.col("accuracy").std().round(2).alias("spread"),
+        pl.col("accuracy").min().alias("worst"),
+        pl.col("accuracy").max().alias("best"),
+    )
+    .sort("mean_accuracy", descending=True)
+)
+repeated_summary
+```
+
+```{python}
+(
+    ggplot(repeated_scores, aes(x="model", y="accuracy"))
+    + geom_boxplot(fill="#cde2fb", color="#2a78d6", width=0.6, outlier_size=2,
+                   tooltips=layer_tooltips().line("@model"))
+    # Dark dot = each model's average across the 50 runs
+    + geom_point(aes(x="model", y="mean_accuracy"), data=repeated_summary,
+                 color="#184f95", size=4,
+                 tooltips=layer_tooltips().line("@model")
+                                          .line("Average|@mean_accuracy%"))
+    + scale_x_discrete(limits=repeated_summary["model"].to_list())
+    # Zoomed in so the boxes are easy to compare (baseline is 50%, far below)
+    + coord_cartesian(ylim=[68, 77])
+    + labs(
+        title="Accuracy across 50 cross-validation runs (all 12 inputs)",
+        subtitle=f"Dot = average, line in box = median. Sorted best to worst. Baseline (always guessing): {baseline_acc * 100:.1f}%",
+        x="", y="Accuracy (%)",
+    )
+    + theme_minimal()
+    + theme(axis_text_x=element_text(angle=30, hjust=1))
+    + ggsize(900, 500)
+)
+```
+
+### Does first blood add anything once you know the gold?
+
+Logistic Regression with all 12 inputs, scaled. Each weight shows how much one
+standard deviation of that input pushes toward a blue win (positive) or a red
+win (negative). Inputs that move with gold (see the correlation chart above)
+share credit with it, so a small or negative weight doesn't mean that stat
+hurts. For example, kills are 0.91 correlated with gold: gold takes most of the
+credit, and the kills weight only fine-tunes around it.
+
+```{python}
+lr_all = make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000))
+lr_all.fit(train.select(feature_cols).to_numpy(), y_train)
+
+weights = (
+    pl.DataFrame({
+        "input": feature_cols,
+        "weight": lr_all.named_steps["logisticregression"].coef_[0],
+    })
+    .with_columns(pl.col("weight").round(3), pl.col("weight").abs().alias("size"))
+    .sort("size")
+)
+
+(
+    ggplot(weights, aes(x="weight", y="input"))
+    + geom_bar(stat="identity", orientation="y", fill="#2a78d6", width=0.7,
+               tooltips=layer_tooltips().line("@input").line("Weight|@weight"))
+    + geom_vline(xintercept=0, color="#888888", size=0.5)
+    + scale_y_discrete(limits=weights["input"].to_list())
+    + labs(
+        title="Logistic Regression weights (all inputs, scaled)",
+        x="Weight (positive = favors blue win)", y="",
+    )
+    + theme_minimal()
+)
+```
+
+### The fun one: reading the decision tree
+
+The 3-level tree trained on all 12 inputs, written out as rules. `class: 1`
+means the tree predicts a blue win.
+
+```{python}
+tree_all = DecisionTreeClassifier(max_depth=3, random_state=42)
+tree_all.fit(train.select(feature_cols).to_numpy(), y_train)
+print(export_text(tree_all, feature_names=feature_cols, decimals=0))
+```
+
+### Mistakes made by the best model
+
+The best model is picked by **cross-validation accuracy** (training games), not
+by test accuracy, so the test set is never used to make choices.
+
+```{python}
+best = (
+    results.filter(pl.col("inputs") == "All 12 inputs")
+    .sort("cv_accuracy", descending=True)
+    .row(0, named=True)
+)
+print("Best model on all inputs (by CV accuracy):", best["model"])
+
+best_model = models[best["model"]]
+best_model.fit(train.select(feature_cols).to_numpy(), y_train)
+best_pred = best_model.predict(test.select(feature_cols).to_numpy())
+
+cm = confusion_matrix(y_test, best_pred)
+pl.DataFrame({
+    "actual": ["Red won (0)", "Blue won (1)"],
+    "predicted red": cm[:, 0],
+    "predicted blue": cm[:, 1],
+})
+```
+
+```{python}
+print(classification_report(y_test, best_pred, target_names=["Red won", "Blue won"]))
+```
+
+## Conclusion
+
+**Question:** At 10 minutes into a high-Diamond ranked game, what tells you more
+about who will win: first blood or the gold lead?
+
+**Findings:**
+
+1. **The gold lead matters much more than first blood.** First blood alone
+   predicts the winner about 60% of the time; the gold lead alone gets about 72%.
+2. **First blood adds almost nothing once you know the gold.** Adding it to the
+   gold lead moved accuracy by about 0.1 points, and in the full Logistic
+   Regression its weight (0.04) is tiny next to gold's (1.30). First blood's
+   value is mostly already counted in the gold it earns.
+3. **The other early stats barely help either.** Using all 12 inputs scored
+   about the same as gold alone, because kills, assists, XP, and CS move closely
+   with gold (correlations of 0.6 to 0.9).
+4. **About 73% is the ceiling for 10-minute data.** Seven very different models
+   (Logistic Regression, Random Forest, Gradient Boosting, SVM, Naive Bayes,
+   K-Nearest Neighbors, and a small Decision Tree) all averaged between 72% and
+   74% across 50 cross-validation runs. When every model hits the same wall,
+   the limit is the data, not the model.
+5. **The simplest model won.** Logistic Regression had the best average (73.7%).
+   The relationship is mostly a straight line, so a bigger gold lead means a
+   higher chance to win, and complex models found nothing extra to use.
+
+**How to read 73%:** across all games, the model picks the right winner about
+73% of the time. It is *not* "a team with a gold lead wins 73% of the time."
+The model's confidence depends on the size of the lead: blue won 57% of games
+with a 0 to 1k lead, 83% with a 2k to 3k lead, and 98% with a lead of 5k or
+more. Most games are close, and close games are where the mistakes happen. The
+model's mistakes are evenly split between the two teams (precision and recall
+both about 71–72%), so it doesn't favor blue or red.
+
+## Limitations and future work
+
+- **One moment in the game.** Every input is a snapshot at 10 minutes. Anything
+  that happens later (teamfights, Baron, throws) is invisible to the model,
+  which is why roughly a quarter of games can't be predicted.
+- **Ranked solo queue, around 2020.** These are high-Diamond solo players, not
+  organized pro teams, from an older version of the game. Objectives and gold
+  have changed since then (for example, Void Grubs were added in 2024), so a
+  10-minute gold lead may be worth more or less today.
+- **Wards placed has recording errors.** Some games show over 100 wards in 10
+  minutes. Those values were capped at the training data's 99th percentile, so
+  results for wards should be read with caution.
+
+**Next steps:**
+
+- **Compare time points.** With data at 10, 15, and 20 minutes (for example,
+  Oracle's Elixir pro match data), the same models could show when games
+  become effectively decided. Accuracy would likely rise at later time points,
+  but the prediction would also be less useful, since leads become obvious.
+- **Test on current data.** Re-running this on recent games would show whether
+  the early game matters more or less in today's version of League.

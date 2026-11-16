@@ -1,0 +1,8 @@
+# Files created when re-rendering the report locally
+report/*.html
+report/*_files/
+report/*.csv
+report/.quarto/
+.quarto/
+__pycache__/
+.ipynb_checkpoints/
